@@ -1,0 +1,21 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 1
+    cooldown:
+      default-days: 3
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      actions:
+        patterns:
+          - "*"
+    allow:
+      - dependency-name: "pypa/gh-action-pypi-publish"
+      - dependency-name: "PyO3/maturin-action"
+      - dependency-name: "docker/login-action"
+      - dependency-name: "actions/*"

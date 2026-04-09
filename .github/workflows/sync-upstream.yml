@@ -1,0 +1,45 @@
+name: sync-upstream
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/microsoft/regorus.git
+          git fetch upstream main
+
+      - name: Check for new release
+        id: check
+        run: |
+          CURRENT=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          UPSTREAM=$(git show upstream/main:Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+          echo "current=$CURRENT upstream=$UPSTREAM"
+          echo "upstream=$UPSTREAM" >> $GITHUB_OUTPUT
+          if [ "$CURRENT" != "$UPSTREAM" ]; then
+            echo "new_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "new_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Sync main to upstream
+        run: git push origin upstream/main:refs/heads/main --force
+
+      - name: Trigger publish
+        if: steps.check.outputs.new_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run publish-python.yml --ref publish -f target=pypi
