@@ -18,5 +18,6 @@ updates:
       - dependency-name: "pypa/gh-action-pypi-publish"
       - dependency-name: "PyO3/maturin-action"
       - dependency-name: "docker/login-action"
+      - dependency-name: "docker/setup-qemu-action"
       - dependency-name: "astral-sh/setup-uv"
       - dependency-name: "actions/*"
