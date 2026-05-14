@@ -35,8 +35,31 @@ jobs:
             echo "new_release=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Sync main to upstream
-        run: git push origin upstream/main:refs/heads/main --force
+      - name: Sync main to upstream (preserving our workflows)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          UPSTREAM_SHA=$(git rev-parse upstream/main)
+
+          # If main is already "upstream/main + 1 preserve commit", nothing to do.
+          if [ "$(git rev-parse main^ 2>/dev/null || echo none)" = "$UPSTREAM_SHA" ]; then
+            echo "Already in sync with upstream."
+            exit 0
+          fi
+
+          # Capture our .github/workflows tree from current main (= origin/main).
+          OUR_WORKFLOWS_TREE=$(git rev-parse HEAD:.github/workflows)
+
+          # Reset main to upstream, then splice our workflows on top as one commit.
+          # The net diff from origin/main never touches .github/workflows, so the
+          # default GITHUB_TOKEN's lack of `workflows` permission isn't a blocker.
+          git checkout -B main "$UPSTREAM_SHA"
+          git rm -rf --cached --ignore-unmatch .github/workflows
+          git read-tree --prefix=.github/workflows/ "$OUR_WORKFLOWS_TREE"
+
+          git commit -m "preserve gordon-to workflows"
+          git push origin main --force
 
       - name: Trigger publish
         if: steps.check.outputs.new_release == 'true'
