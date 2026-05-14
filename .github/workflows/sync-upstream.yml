@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   sync:
@@ -65,4 +66,4 @@ jobs:
         if: steps.check.outputs.new_release == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run publish-python.yml --ref publish -f target=pypi
+        run: gh workflow run publish-python.yml -R "$GITHUB_REPOSITORY" --ref publish -f target=pypi
