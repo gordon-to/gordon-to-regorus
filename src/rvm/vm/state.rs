@@ -11,29 +11,69 @@ use super::machine::RegoVM;
 impl RegoVM {
     /// Reset all execution state and return objects to pools for reuse
     pub(super) fn reset_execution_state(&mut self) {
+        self.release_previous_execution_state();
+        self.initialize_execution_state();
+    }
+
+    /// Release values retained by the previous execution before capturing a new memory baseline.
+    pub(super) fn reset_run_to_completion_state(&mut self) -> Result<()> {
+        self.release_previous_execution_state();
+        #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+        if matches!(
+            self.memory_budget_lifecycle,
+            super::machine::MemoryBudgetLifecycle::FfiResultSerialization
+        ) {
+            // The internal FFI serialization window owns the baseline. Observe the
+            // post-release trough before initialization so fresh state allocations are
+            // charged to that execution.
+            self.check_memory_budget()?;
+        } else {
+            self.reset_memory_budget_state();
+        }
+        self.initialize_execution_state();
+        Ok(())
+    }
+
+    fn release_previous_execution_state(&mut self) {
+        self.evaluated = Value::Undefined;
+        self.execution_state = ExecutionState::Ready;
+        self.execution_stack.clear();
+        self.return_to_pools();
+        self.rule_cache.clear();
+        self.registers.clear();
+        self.builtins_cache.clear();
+        self.cached_builtin_args.clear();
+    }
+
+    /// Release values retained by a failed run-to-completion execution and record its error.
+    ///
+    pub(super) fn fail_run_to_completion(&mut self, error: VmError) -> VmError {
+        self.release_previous_execution_state();
+        #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+        {
+            self.finish_active_memory_budget_execution();
+        }
+        self.execution_state = ExecutionState::Error {
+            error: error.clone(),
+        };
+        error
+    }
+
+    fn initialize_execution_state(&mut self) {
         // Reset basic execution state
         self.executed_instructions = 0;
         self.pc = 0;
         self.evaluated = Value::new_object();
         self.cache_hits = 0;
 
-        // Reset suspendable execution state
-        self.execution_stack.clear();
         self.execution_state = ExecutionState::Ready;
-
-        // Return objects to pools and clear stacks
-        self.return_to_pools();
 
         // Reset rule cache
         self.rule_cache = alloc::vec![(false, Value::Undefined); self.program.rule_infos.len()];
 
         // Reset registers to clean state
-        self.registers.clear();
         self.registers
             .resize(self.base_register_count, Value::Undefined);
-
-        // Builtin cache entries only live for a single execution
-        self.builtins_cache.clear();
 
         // Postcondition: every stack/cache that `reset_execution_state` touches
         // must be in its documented "clean" shape. This catches accidental
@@ -219,5 +259,159 @@ impl RegoVM {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    use super::super::machine::MemoryBudgetLifecycle;
+    use super::{ExecutionState, RegoVM, Value, VmError};
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    use crate::rvm::program::{RuleInfo, RuleType};
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    use crate::rvm::{instructions::Instruction, program::Program};
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    use crate::MemoryBudgetConfig;
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    use alloc::sync::Arc;
+    use alloc::vec;
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    use core::num::NonZeroU64;
+
+    #[test]
+    fn failed_run_to_completion_releases_retained_values() {
+        let mut vm = RegoVM::new();
+        let retained = Value::from("retained");
+        vm.evaluated = retained.clone();
+        vm.registers = vec![retained.clone()];
+        vm.rule_cache = vec![(true, retained.clone())];
+        vm.register_stack.push(vec![retained.clone()]);
+        vm.cached_builtin_args = vec![retained.clone()];
+        vm.execution_state = ExecutionState::Completed { result: retained };
+        #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+        {
+            vm.memory_budget_lifecycle = MemoryBudgetLifecycle::ImplicitExecution;
+        }
+
+        let error = VmError::MemoryBudgetExceeded {
+            usage: 2,
+            budget: 1,
+            pc: 3,
+        };
+
+        assert_eq!(vm.fail_run_to_completion(error.clone()), error);
+        assert!(matches!(vm.evaluated, Value::Undefined));
+        assert!(vm.registers.is_empty());
+        assert!(vm.rule_cache.is_empty());
+        assert!(vm.register_stack.is_empty());
+        assert!(vm
+            .register_window_pool
+            .iter()
+            .all(alloc::vec::Vec::is_empty));
+        assert!(vm.cached_builtin_args.is_empty());
+        assert_eq!(
+            vm.execution_state,
+            ExecutionState::Error {
+                error: error.clone()
+            }
+        );
+        #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+        assert!(matches!(
+            vm.memory_budget_lifecycle,
+            MemoryBudgetLifecycle::Inactive
+        ));
+    }
+
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn successful_ordinary_executions_finish_their_implicit_memory_budget() {
+        let mut program = Program::new();
+        program.entry_points.insert("main".into(), 0);
+        program.instructions = vec![Instruction::Return { value: 0 }];
+        program.instruction_spans = vec![None];
+
+        let mut vm = RegoVM::new();
+        vm.load_program(Arc::new(program));
+        vm.set_memory_budget_config(Some(MemoryBudgetConfig {
+            limit: NonZeroU64::new(1024 * 1024).unwrap_or(NonZeroU64::MIN),
+        }));
+
+        assert_eq!(
+            vm.execute().expect("main execution succeeds"),
+            Value::Undefined
+        );
+        assert!(matches!(
+            vm.memory_budget_lifecycle,
+            MemoryBudgetLifecycle::Inactive
+        ));
+
+        assert_eq!(
+            vm.execute_entry_point_by_name("main")
+                .expect("named execution succeeds"),
+            Value::Undefined
+        );
+        assert!(matches!(
+            vm.memory_budget_lifecycle,
+            MemoryBudgetLifecycle::Inactive
+        ));
+
+        assert_eq!(
+            vm.execute_entry_point_by_index(0)
+                .expect("indexed execution succeeds"),
+            Value::Undefined
+        );
+        assert!(matches!(
+            vm.memory_budget_lifecycle,
+            MemoryBudgetLifecycle::Inactive
+        ));
+    }
+
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    #[test]
+    fn ffi_result_serialization_counts_fresh_initialization_after_releasing_previous_state() {
+        let rule_info = RuleInfo::new(
+            "unused".into(),
+            RuleType::Complete,
+            crate::Rc::new(alloc::vec![]),
+            0,
+            0,
+        );
+        let mut program = Program::new();
+        program.dispatch_window_size = 1;
+        program.max_rule_window_size = 1;
+        program.entry_points.insert("main".into(), 0);
+        program.rule_infos = alloc::vec![rule_info; Program::MAX_RULES];
+        program.instructions = alloc::vec![Instruction::Return { value: 0 }];
+        program.instruction_spans = alloc::vec![None];
+
+        let mut vm = RegoVM::new();
+        vm.load_program(Arc::new(program));
+        // Model a reused VM whose completed result is released before fresh
+        // execution-state allocation. The FFI window must observe that trough,
+        // then charge the fresh rule-cache allocation.
+        vm.rule_cache = alloc::vec![];
+        let retained = Value::from(
+            (0..(Program::MAX_RULES * 4))
+                .map(Value::from)
+                .collect::<alloc::vec::Vec<_>>(),
+        );
+        vm.evaluated = retained.clone();
+        vm.execution_state = ExecutionState::Completed { result: retained };
+        vm.set_memory_budget_config(Some(MemoryBudgetConfig {
+            limit: NonZeroU64::new(32 * 1024).unwrap_or(NonZeroU64::MIN),
+        }));
+
+        assert!(matches!(
+            vm.execute_to_c_string_for_ffi(),
+            Err(VmError::MemoryBudgetExceeded { .. })
+        ));
+        assert!(matches!(
+            vm.execution_state,
+            ExecutionState::Error {
+                error: VmError::MemoryBudgetExceeded { .. }
+            }
+        ));
     }
 }

@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add execute-only RVM memory-budget configuration through
+  `regorus_rvm_set_memory_budget_config`, `RegorusMemoryBudgetConfig`, and appended statuses for
+  exhaustion and unsupported suspendable execution. Native execute result serialization and C-string
+  allocation are included in the configured budget.
+
 ## [0.1.0](https://github.com/microsoft/regorus/releases/tag/regorus-ffi-v0.1.0) - 2024-02-08
 
 ### Other

@@ -105,6 +105,35 @@ var result = vm.Execute();
 Console.WriteLine($"allow: {result}");
 ```
 
+### Per-execution memory budget
+
+RVM run-to-completion evaluation can use an optional additional live-memory budget. Each ordinary `Execute` or `ExecuteEntryPoint` call starts with a fresh budget for execution; program compilation, program loading, and prior `SetDataJson`, `SetInputJson`, and `SetContextJson` calls occur before and outside that budget.
+
+```csharp
+using var vm = new Rvm();
+vm.LoadProgram(program);
+vm.SetDataJson(Data);
+vm.SetInputJson(Input);
+vm.SetMemoryBudgetConfig(new MemoryBudgetConfig(16 * 1024 * 1024));
+
+try
+{
+    var result = vm.Execute();
+}
+catch (RegorusMemoryBudgetExceededException ex)
+{
+    Console.WriteLine(ex.Message);
+}
+```
+
+The native execution budget includes result JSON serialization and Rust `CString` allocation before the native call returns. Managed UTF-8 decoding and C# `string` allocation after that return are not charged.
+
+This is a cooperative observed-live-bytes budget, not an allocation-time peak-memory cap. A single instruction, builtin, native serialization, or `CString` allocation may exceed the limit before the next checkpoint; configure headroom for that overshoot.
+
+Accounting observes the execution thread rather than allocation ownership. Synchronous host work on that thread contributes to usage, cross-thread frees can temporarily skew observations, and a downward baseline ratchet can permanently remove headroom during an execution. A reused VM receives a new baseline, but retained capacities and pools can make it allocate differently from a fresh VM. See the [RVM memory budget documentation](../../docs/limits/memory_budget.md) for the detailed accounting model.
+
+Budgets are not supported in suspendable execution mode. `ClearMemoryBudgetConfig` restores the previous unlimited per-execution behavior. Public multi-call begin/end scopes are intentionally absent because allocator counters are thread-local. Failed terminal execution clears retained state. The process-wide limit exposed by `MemoryLimits` remains a separate safeguard.
+
 ## Azure RBAC Condition Evaluation
 
 Evaluate Azure RBAC condition expressions directly with a JSON evaluation context:

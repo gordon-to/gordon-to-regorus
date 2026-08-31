@@ -16,6 +16,7 @@ use super::machine::RegoVM;
 
 impl RegoVM {
     pub fn execute(&mut self) -> Result<Value> {
+        self.ensure_memory_budget_execution_mode()?;
         match self.execution_mode {
             ExecutionMode::RunToCompletion => self.execute_run_to_completion(),
             ExecutionMode::Suspendable => self.execute_suspendable(),
@@ -23,6 +24,7 @@ impl RegoVM {
     }
 
     pub fn execute_entry_point_by_index(&mut self, index: usize) -> Result<Value> {
+        self.ensure_memory_budget_execution_mode()?;
         let (entry_point_name, entry_point_pc) = {
             let (name, &pc) = self.program.entry_points.get_index(index).ok_or(
                 VmError::InvalidEntryPointIndex {
@@ -44,19 +46,31 @@ impl RegoVM {
 
         match self.execution_mode {
             ExecutionMode::RunToCompletion => {
-                self.reset_execution_state();
-                self.reset_execution_timer_state();
+                let result = (|| {
+                    self.reset_run_to_completion_state()?;
+                    self.reset_execution_timer_state();
+                    self.validate_vm_state()?;
+                    let entry_point_pc_u32 = u32::try_from(entry_point_pc).map_err(|_| {
+                        VmError::EntryPointPcOutOfBounds {
+                            pc: entry_point_pc,
+                            instruction_count: self.program.instructions.len(),
+                            entry_point: entry_point_name.clone(),
+                        }
+                    })?;
 
-                self.validate_vm_state()?;
-                let entry_point_pc_u32 = u32::try_from(entry_point_pc).map_err(|_| {
-                    VmError::EntryPointPcOutOfBounds {
-                        pc: entry_point_pc,
-                        instruction_count: self.program.instructions.len(),
-                        entry_point: entry_point_name.clone(),
+                    let result = self
+                        .jump_to(entry_point_pc_u32)
+                        .map_err(|err| self.apply_memory_budget_precedence(err))?;
+                    self.check_memory_budget()?;
+                    Ok(result)
+                })();
+                match result {
+                    Ok(value) => {
+                        self.finish_implicit_memory_budget_execution();
+                        Ok(value)
                     }
-                })?;
-
-                self.jump_to(entry_point_pc_u32)
+                    Err(err) => Err(self.fail_run_to_completion(err)),
+                }
             }
             ExecutionMode::Suspendable => {
                 self.reset_execution_state();
@@ -69,6 +83,7 @@ impl RegoVM {
     }
 
     pub fn execute_entry_point_by_name(&mut self, name: &str) -> Result<Value> {
+        self.ensure_memory_budget_execution_mode()?;
         let entry_point_pc =
             self.program
                 .get_entry_point(name)
@@ -88,19 +103,31 @@ impl RegoVM {
 
         match self.execution_mode {
             ExecutionMode::RunToCompletion => {
-                self.reset_execution_state();
-                self.reset_execution_timer_state();
+                let result = (|| {
+                    self.reset_run_to_completion_state()?;
+                    self.reset_execution_timer_state();
+                    self.validate_vm_state()?;
+                    let entry_point_pc_u32 = u32::try_from(entry_point_pc).map_err(|_| {
+                        VmError::EntryPointPcOutOfBounds {
+                            pc: entry_point_pc,
+                            instruction_count: self.program.instructions.len(),
+                            entry_point: String::from(name),
+                        }
+                    })?;
 
-                self.validate_vm_state()?;
-                let entry_point_pc_u32 = u32::try_from(entry_point_pc).map_err(|_| {
-                    VmError::EntryPointPcOutOfBounds {
-                        pc: entry_point_pc,
-                        instruction_count: self.program.instructions.len(),
-                        entry_point: String::from(name),
+                    let result = self
+                        .jump_to(entry_point_pc_u32)
+                        .map_err(|err| self.apply_memory_budget_precedence(err))?;
+                    self.check_memory_budget()?;
+                    Ok(result)
+                })();
+                match result {
+                    Ok(value) => {
+                        self.finish_implicit_memory_budget_execution();
+                        Ok(value)
                     }
-                })?;
-
-                self.jump_to(entry_point_pc_u32)
+                    Err(err) => Err(self.fail_run_to_completion(err)),
+                }
             }
             ExecutionMode::Suspendable => {
                 self.reset_execution_state();
@@ -163,20 +190,26 @@ impl RegoVM {
     }
 
     fn execute_run_to_completion(&mut self) -> Result<Value> {
-        self.reset_execution_state();
-        self.reset_execution_timer_state();
-        self.execution_state = ExecutionState::Running;
-        match self.jump_to(0_u32) {
+        let result = (|| {
+            self.reset_run_to_completion_state()?;
+            self.reset_execution_timer_state();
+            self.execution_state = ExecutionState::Running;
+            self.jump_to(0_u32)
+                .map_err(|err| self.apply_memory_budget_precedence(err))
+                .and_then(|value| {
+                    self.check_memory_budget()?;
+                    Ok(value)
+                })
+        })();
+        match result {
             Ok(value) => {
                 self.execution_state = ExecutionState::Completed {
                     result: value.clone(),
                 };
+                self.finish_implicit_memory_budget_execution();
                 Ok(value)
             }
-            Err(err) => {
-                self.execution_state = ExecutionState::Error { error: err.clone() };
-                Err(err)
-            }
+            Err(err) => Err(self.fail_run_to_completion(err)),
         }
     }
 
@@ -210,6 +243,8 @@ impl RegoVM {
     }
 
     pub fn resume(&mut self, resume_value: Option<Value>) -> Result<Value> {
+        self.ensure_memory_budget_resume_supported()?;
+
         // Precondition is enforced below by returning `VmError::InvalidResumeState`
         // for any non-`Suspended` state. A `debug_assert!` here would diverge
         // debug vs release behavior and, when invoked via FFI, would trip the
@@ -661,5 +696,34 @@ impl RegoVM {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExecutionMode, Instruction, Program, RegoVM, Value};
+    use alloc::sync::Arc;
+    use alloc::vec;
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn execution_loops_check_memory_once_per_dispatched_instruction() {
+        let mut program = Program::new();
+        program.instructions = vec![
+            Instruction::LoadTrue { dest: 0 },
+            Instruction::Return { value: 0 },
+        ];
+        program.instruction_spans = vec![None; program.instructions.len()];
+        let program = Arc::new(program);
+
+        for mode in [ExecutionMode::RunToCompletion, ExecutionMode::Suspendable] {
+            let mut vm = RegoVM::new();
+            vm.set_execution_mode(mode);
+            vm.load_program(program.clone());
+
+            assert_eq!(vm.execute().expect("execution succeeds"), Value::Bool(true));
+            assert_eq!(vm.executed_instructions, 2);
+            assert_eq!(vm.memory_check_count, vm.executed_instructions);
+        }
     }
 }

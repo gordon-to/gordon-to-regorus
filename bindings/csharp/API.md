@@ -81,6 +81,49 @@ The Regorus C# bindings provide a modern, thread-safe API for compiling and eval
 - **Thread Safety**: All operations are thread-safe without external synchronization
 - **Registry Management**: Centralized management of targets and schemas
 - **Policy Introspection**: Rich metadata about compiled policies
+- **RVM Memory Budgets**: Optional per-execution live-memory limits for run-to-completion evaluation
+
+## RVM Memory Budgets
+
+`Rvm.SetMemoryBudgetConfig` configures a fresh non-zero budget for each run-to-completion execution. `Rvm.ClearMemoryBudgetConfig` restores unlimited execution.
+
+```csharp
+public readonly struct MemoryBudgetConfig
+{
+    public MemoryBudgetConfig(ulong limitBytes);
+    public ulong LimitBytes { get; }
+}
+
+public sealed class Rvm : IDisposable
+{
+    public void SetMemoryBudgetConfig(MemoryBudgetConfig config);
+    public void ClearMemoryBudgetConfig();
+}
+```
+
+Ordinary `Execute` and `ExecuteEntryPoint` calls use the existing VM data and start a fresh budget for execution. Program compilation, program loading, and prior `SetDataJson`, `SetInputJson`, and `SetContextJson` calls occur before and outside the budget; use this path for static or preloaded data.
+
+```csharp
+using var vm = new Rvm();
+vm.SetMemoryBudgetConfig(new MemoryBudgetConfig(16UL * 1024 * 1024));
+
+try
+{
+    var result = vm.Execute();
+}
+catch (RegorusMemoryBudgetExceededException)
+{
+    // The execution exceeded its configured budget.
+}
+```
+
+Native result JSON serialization and Rust `CString` allocation are included before an `Execute` or `ExecuteEntryPoint` call returns. Managed UTF-8 decoding and the managed C# `string` allocation after the native call returns are excluded.
+
+Memory budgets require a native library built with allocator memory tracking and are supported only for run-to-completion execution. `RegorusMemoryBudgetExceededException` is thrown when a budget is exceeded. `RegorusMemoryBudgetUnsupportedException` is thrown if a configured budget is used to start or resume suspendable execution.
+
+Enforcement samples observed live bytes at checkpoints; it is not an allocation-time peak-memory cap. An instruction, builtin, native serialization, or `CString` allocation can overshoot before it is rejected. The reported native usage is a change in the execution thread's live-byte counter, not exact memory owned by the query. Synchronous host work affects the sample, cross-thread frees can temporarily skew it, and downward baseline ratcheting does not restore lost headroom.
+
+A reused VM gets a fresh baseline, but capacities and pools retained before that baseline can make a warm execution allocate differently from a fresh one. Failed terminal execution clears retained state. Public multi-call begin/end scopes are intentionally absent because allocator counters are thread-local and abandoned or cross-thread scopes would be unsafe. The [detailed RVM memory budget documentation](../../docs/limits/memory_budget.md) is authoritative for accounting behavior.
 
 ## Core Classes
 

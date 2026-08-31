@@ -70,6 +70,82 @@ impl Drop for PanicHookGuard {
 
 static POISONED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(all(test, feature = "std"))]
+static POISON_TEST_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+#[cfg(all(test, feature = "std"))]
+std::thread_local! {
+    static POISON_TEST_GATE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(test, feature = "std"))]
+pub(crate) struct PoisonTestLock {
+    lock: Option<std::sync::RwLockWriteGuard<'static, ()>>,
+}
+
+#[cfg(all(test, feature = "std"))]
+impl Drop for PoisonTestLock {
+    fn drop(&mut self) {
+        self.lock.take();
+        decrement_poison_test_gate_depth();
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+pub(crate) fn lock_poison_test_state() -> PoisonTestLock {
+    debug_assert!(
+        !poison_test_gate_is_held(),
+        "the poison test gate cannot be upgraded from a nested guarded call"
+    );
+    let lock = POISON_TEST_GATE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    increment_poison_test_gate_depth();
+    PoisonTestLock { lock: Some(lock) }
+}
+
+#[cfg(all(test, feature = "std"))]
+struct PoisonTestCallLock {
+    lock: Option<std::sync::RwLockReadGuard<'static, ()>>,
+}
+
+#[cfg(all(test, feature = "std"))]
+impl Drop for PoisonTestCallLock {
+    fn drop(&mut self) {
+        self.lock.take();
+        decrement_poison_test_gate_depth();
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+fn poison_test_call_lock() -> PoisonTestCallLock {
+    let nested = poison_test_gate_is_held();
+    increment_poison_test_gate_depth();
+    if nested {
+        PoisonTestCallLock { lock: None }
+    } else {
+        let lock = POISON_TEST_GATE
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        PoisonTestCallLock { lock: Some(lock) }
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+fn poison_test_gate_is_held() -> bool {
+    POISON_TEST_GATE_DEPTH.with(|depth| depth.get() > 0)
+}
+
+#[cfg(all(test, feature = "std"))]
+fn increment_poison_test_gate_depth() {
+    POISON_TEST_GATE_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+}
+
+#[cfg(all(test, feature = "std"))]
+fn decrement_poison_test_gate_depth() {
+    POISON_TEST_GATE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+}
+
 /// Result of attempting to run `f` while guarding against unwinding.
 pub(crate) enum GuardResult<T> {
     /// Closure completed successfully.
@@ -82,6 +158,9 @@ pub(crate) fn with_unwind_guard<F>(f: F) -> RegorusResult
 where
     F: FnOnce() -> RegorusResult,
 {
+    #[cfg(all(test, feature = "std"))]
+    let _poison_test_call_lock = poison_test_call_lock();
+
     if is_poisoned() {
         return poisoned_result();
     }
@@ -156,4 +235,56 @@ pub(crate) fn is_poisoned() -> bool {
 
 pub(crate) fn reset_poison() {
     POISONED.store(false, Ordering::Release);
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::with_unwind_guard;
+    use crate::common::{regorus_result_drop, RegorusResult, RegorusStatus};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn ordinary_guarded_calls_are_not_serialized_by_the_poison_test_gate() {
+        let (first_entered_sender, first_entered_receiver) = mpsc::channel();
+        let (second_entered_sender, second_entered_receiver) = mpsc::channel();
+
+        let first = std::thread::spawn(move || {
+            let result = with_unwind_guard(|| {
+                let _ = first_entered_sender.send(());
+                let second_entered = second_entered_receiver
+                    .recv_timeout(Duration::from_secs(1))
+                    .is_ok();
+                RegorusResult::ok_bool(second_entered)
+            });
+            let success = matches!(result.status, RegorusStatus::Ok) && result.bool_value;
+            regorus_result_drop(result);
+            success
+        });
+
+        assert!(
+            first_entered_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .is_ok(),
+            "first guarded call did not start"
+        );
+
+        let second = std::thread::spawn(move || {
+            let result = with_unwind_guard(|| {
+                let _ = second_entered_sender.send(());
+                RegorusResult::ok_void()
+            });
+            let success = matches!(result.status, RegorusStatus::Ok);
+            regorus_result_drop(result);
+            success
+        });
+
+        let first_success = first.join().unwrap_or(false);
+        let second_success = second.join().unwrap_or(false);
+        assert!(second_success, "second guarded call did not complete");
+        assert!(
+            first_success,
+            "ordinary guarded calls were serialized by the poison test gate"
+        );
+    }
 }

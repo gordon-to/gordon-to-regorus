@@ -92,6 +92,7 @@ mod panic_tests {
 
     #[test]
     fn catches_extension_panics_and_marks_poison() {
+        let _poison_test_lock = crate::panic_guard::lock_poison_test_state();
         reset_poison();
 
         let engine_ptr = regorus_engine_new();

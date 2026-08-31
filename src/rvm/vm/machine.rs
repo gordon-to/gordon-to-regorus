@@ -4,6 +4,8 @@
 use crate::rvm::program::Program;
 #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
 use crate::utils::limits;
+#[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+use crate::utils::limits::MemoryBudgetConfig;
 use crate::utils::limits::{
     fallback_execution_timer_config, monotonic_now, ExecutionTimer, ExecutionTimerConfig,
     LimitError,
@@ -11,6 +13,7 @@ use crate::utils::limits::{
 use crate::value::Value;
 use crate::CompiledPolicy;
 use alloc::collections::{btree_map::Entry, BTreeMap, VecDeque};
+use alloc::ffi::CString;
 #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
 use alloc::format;
 use alloc::string::String;
@@ -24,6 +27,14 @@ use super::errors::{Result, VmError};
 use super::execution_model::{
     BreakpointSet, ExecutionMode, ExecutionStack, ExecutionState, SuspendReason,
 };
+
+#[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MemoryBudgetLifecycle {
+    Inactive,
+    ImplicitExecution,
+    FfiResultSerialization,
+}
 
 /// The Rego Virtual Machine
 #[derive(Debug)]
@@ -81,6 +92,9 @@ pub struct RegoVM {
     /// Current count of executed instructions
     pub(super) executed_instructions: usize,
 
+    #[cfg(test)]
+    pub(super) memory_check_count: usize,
+
     /// Cache for evaluated paths in virtual data document lookup
     /// Structure: evaluated[path_component1][path_component2]...[Undefined] = result_value
     pub(super) evaluated: Value,
@@ -131,6 +145,18 @@ pub struct RegoVM {
     /// Elapsed wall-clock time recorded when the VM entered a suspended state
     pub(super) execution_timer_elapsed_at_suspend: Option<Duration>,
 
+    /// Optional additional live-memory budget for each run-to-completion execution
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    pub(super) memory_budget_config: Option<MemoryBudgetConfig>,
+
+    /// Current-thread live-byte baseline captured at execution start
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    pub(super) memory_budget_baseline: i64,
+
+    /// Owner of the current memory-budget baseline.
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    pub(super) memory_budget_lifecycle: MemoryBudgetLifecycle,
+
     /// Cached dummy span for builtin calls (avoids Source::from_contents per call)
     pub(super) dummy_span: Option<crate::lexer::Span>,
 
@@ -153,6 +179,25 @@ pub struct RegoVM {
     /// Cached `Value` representation of `program.metadata`, computed once in
     /// `load_program()` and reused by `LoadMetadata` instructions.
     pub(super) metadata_value: Value,
+}
+
+#[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+struct FfiResultSerializationBudget<'a> {
+    vm: &'a mut RegoVM,
+}
+
+#[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+impl FfiResultSerializationBudget<'_> {
+    const fn vm(&mut self) -> &mut RegoVM {
+        self.vm
+    }
+}
+
+#[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+impl Drop for FfiResultSerializationBudget<'_> {
+    fn drop(&mut self) {
+        self.vm.finish_ffi_result_serialization_memory_budget();
+    }
 }
 
 impl Default for RegoVM {
@@ -183,6 +228,8 @@ impl RegoVM {
             register_window_pool: Vec::new(), // Initialize register window pool
             max_instructions: 25000, // Default maximum instruction limit
             executed_instructions: 0,
+            #[cfg(test)]
+            memory_check_count: 0,
             evaluated: Value::new_object(), // Initialize evaluation cache
             cache_hits: 0,                  // Initialize cache hit counter
             execution_stack: ExecutionStack::new(),
@@ -197,6 +244,12 @@ impl RegoVM {
             execution_timer_config: None,
             execution_timer: ExecutionTimer::new(fallback_timer),
             execution_timer_elapsed_at_suspend: None,
+            #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+            memory_budget_config: None,
+            #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+            memory_budget_baseline: 0,
+            #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+            memory_budget_lifecycle: MemoryBudgetLifecycle::Inactive,
             dummy_span: None,
             dummy_exprs: Vec::new(),
             cached_builtin_args: Vec::new(),
@@ -402,6 +455,232 @@ impl RegoVM {
         self.execution_timer_config
     }
 
+    /// Configure a fresh memory budget for every run-to-completion execution.
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "allocator-memory-limits")))]
+    pub const fn set_memory_budget_config(&mut self, config: Option<MemoryBudgetConfig>) {
+        self.memory_budget_config = config;
+        self.memory_budget_baseline = 0;
+        self.memory_budget_lifecycle = MemoryBudgetLifecycle::Inactive;
+    }
+
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    pub(super) fn reset_memory_budget_state(&mut self) {
+        if matches!(
+            self.memory_budget_lifecycle,
+            MemoryBudgetLifecycle::FfiResultSerialization
+        ) {
+            return;
+        }
+
+        self.memory_budget_baseline = if self.memory_budget_config.is_some() {
+            limits::current_thread_live_bytes()
+        } else {
+            0
+        };
+        self.memory_budget_lifecycle = if self.memory_budget_config.is_some() {
+            MemoryBudgetLifecycle::ImplicitExecution
+        } else {
+            MemoryBudgetLifecycle::Inactive
+        };
+    }
+
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    pub(super) const fn finish_implicit_memory_budget_execution(&mut self) {
+        if matches!(
+            self.memory_budget_lifecycle,
+            MemoryBudgetLifecycle::ImplicitExecution
+        ) {
+            self.memory_budget_baseline = 0;
+            self.memory_budget_lifecycle = MemoryBudgetLifecycle::Inactive;
+        }
+    }
+
+    #[cfg(any(miri, not(feature = "allocator-memory-limits")))]
+    #[allow(clippy::unused_self)]
+    pub(super) const fn finish_implicit_memory_budget_execution(&mut self) {}
+
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    fn begin_ffi_result_serialization_memory_budget(&mut self) {
+        self.memory_budget_baseline = if self.memory_budget_config.is_some() {
+            limits::current_thread_live_bytes()
+        } else {
+            0
+        };
+        self.memory_budget_lifecycle = MemoryBudgetLifecycle::FfiResultSerialization;
+    }
+
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    const fn finish_ffi_result_serialization_memory_budget(&mut self) {
+        if matches!(
+            self.memory_budget_lifecycle,
+            MemoryBudgetLifecycle::FfiResultSerialization
+        ) {
+            self.memory_budget_baseline = 0;
+            self.memory_budget_lifecycle = MemoryBudgetLifecycle::Inactive;
+        }
+    }
+
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    pub(super) const fn finish_active_memory_budget_execution(&mut self) {
+        self.memory_budget_baseline = 0;
+        self.memory_budget_lifecycle = MemoryBudgetLifecycle::Inactive;
+    }
+
+    /// Execute and serialize a main entry point for the native FFI.
+    ///
+    /// This is an internal binding hook, not a general-purpose budget scope. It starts the
+    /// execution budget after data, input, context, and program loading have completed, then
+    /// keeps that budget active only through immediate native JSON and C-string production.
+    #[doc(hidden)]
+    pub fn execute_to_c_string_for_ffi(&mut self) -> Result<CString> {
+        self.execute_to_c_string_for_ffi_with(Self::execute)
+    }
+
+    /// Execute and serialize a named entry point for the native FFI.
+    #[doc(hidden)]
+    pub fn execute_entry_point_by_name_to_c_string_for_ffi(
+        &mut self,
+        name: &str,
+    ) -> Result<CString> {
+        self.execute_to_c_string_for_ffi_with(|vm| vm.execute_entry_point_by_name(name))
+    }
+
+    /// Execute and serialize an indexed entry point for the native FFI.
+    #[doc(hidden)]
+    pub fn execute_entry_point_by_index_to_c_string_for_ffi(
+        &mut self,
+        index: usize,
+    ) -> Result<CString> {
+        self.execute_to_c_string_for_ffi_with(|vm| vm.execute_entry_point_by_index(index))
+    }
+
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    fn execute_to_c_string_for_ffi_with<F>(&mut self, execute: F) -> Result<CString>
+    where
+        F: FnOnce(&mut Self) -> Result<Value>,
+    {
+        self.begin_ffi_result_serialization_memory_budget();
+        let mut budget = FfiResultSerializationBudget { vm: self };
+        let output = (|| {
+            let value = execute(budget.vm())?;
+            let json = value.to_json_str().map_err(VmError::from)?;
+            let output = CString::new(json).map_err(|_| VmError::Internal {
+                message: String::from("RVM JSON result contained an interior NUL byte"),
+                pc: budget.vm().pc,
+            })?;
+            budget.vm().check_memory_budget()?;
+            Ok(output)
+        })();
+
+        match output {
+            Ok(output) => Ok(output),
+            Err(error) => Err(budget.vm().fail_run_to_completion(error)),
+        }
+    }
+
+    #[cfg(any(miri, not(feature = "allocator-memory-limits")))]
+    fn execute_to_c_string_for_ffi_with<F>(&mut self, execute: F) -> Result<CString>
+    where
+        F: FnOnce(&mut Self) -> Result<Value>,
+    {
+        let output = (|| {
+            let value = execute(self)?;
+            let json = value.to_json_str().map_err(VmError::from)?;
+            CString::new(json).map_err(|_| VmError::Internal {
+                message: String::from("RVM JSON result contained an interior NUL byte"),
+                pc: self.pc,
+            })
+        })();
+
+        match output {
+            Ok(output) => Ok(output),
+            Err(error) => Err(self.fail_run_to_completion(error)),
+        }
+    }
+
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    pub(super) const fn ensure_memory_budget_execution_mode(&self) -> Result<()> {
+        if self.memory_budget_config.is_some()
+            && matches!(self.execution_mode, ExecutionMode::Suspendable)
+        {
+            return Err(VmError::MemoryBudgetUnsupportedInSuspendableExecution { pc: self.pc });
+        }
+
+        Ok(())
+    }
+
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    pub(super) const fn ensure_memory_budget_resume_supported(&self) -> Result<()> {
+        if self.memory_budget_config.is_some() {
+            return Err(VmError::MemoryBudgetUnsupportedInSuspendableExecution { pc: self.pc });
+        }
+
+        Ok(())
+    }
+
+    #[cfg(any(miri, not(feature = "allocator-memory-limits")))]
+    #[allow(clippy::unused_self)]
+    pub(super) const fn ensure_memory_budget_execution_mode(&self) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(any(miri, not(feature = "allocator-memory-limits")))]
+    #[allow(clippy::unused_self)]
+    pub(super) const fn ensure_memory_budget_resume_supported(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Check the configured budget against the active execution baseline.
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    pub(super) fn check_memory_budget(&mut self) -> Result<()> {
+        let Some(config) = self.memory_budget_config.filter(|_| {
+            !matches!(
+                self.memory_budget_lifecycle,
+                MemoryBudgetLifecycle::Inactive
+            )
+        }) else {
+            return Ok(());
+        };
+
+        let current = limits::current_thread_live_bytes();
+        self.memory_budget_baseline = self.memory_budget_baseline.min(current);
+        let usage = current
+            .saturating_sub(self.memory_budget_baseline)
+            .unsigned_abs();
+        let budget = config.limit.get();
+        if usage > budget {
+            return Err(VmError::MemoryBudgetExceeded {
+                usage,
+                budget,
+                pc: self.pc,
+            });
+        }
+
+        Ok(())
+    }
+
+    #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
+    pub(super) fn apply_memory_budget_precedence(&mut self, err: VmError) -> VmError {
+        if matches!(err, VmError::MemoryLimitExceeded { .. }) {
+            self.check_memory_budget().err().unwrap_or(err)
+        } else {
+            err
+        }
+    }
+
+    #[cfg(any(miri, not(feature = "allocator-memory-limits")))]
+    #[allow(clippy::unused_self)]
+    pub(super) const fn check_memory_budget(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(any(miri, not(feature = "allocator-memory-limits")))]
+    #[allow(clippy::unused_self)]
+    pub(super) fn apply_memory_budget_precedence(&mut self, err: VmError) -> VmError {
+        err
+    }
+
     pub(super) fn reset_execution_timer_state(&mut self) {
         let config = self.effective_execution_timer_config();
         self.execution_timer = ExecutionTimer::new(config);
@@ -541,22 +820,33 @@ impl RegoVM {
 
     #[cfg(all(feature = "allocator-memory-limits", not(miri)))]
     pub(super) fn memory_check(&mut self) -> Result<()> {
-        limits::check_memory_limit_if_needed().map_err(|err| match err {
-            LimitError::MemoryLimitExceeded { usage, limit } => VmError::MemoryLimitExceeded {
-                usage,
-                limit,
-                pc: self.pc,
-            },
-            other => VmError::Internal {
-                message: format!("unexpected limit error: {other}"),
-                pc: self.pc,
-            },
-        })
+        #[cfg(test)]
+        {
+            self.memory_check_count = self.memory_check_count.saturating_add(1);
+        }
+        self.check_memory_budget()?;
+        limits::check_memory_limit_if_needed()
+            .map_err(|err| match err {
+                LimitError::MemoryLimitExceeded { usage, limit } => VmError::MemoryLimitExceeded {
+                    usage,
+                    limit,
+                    pc: self.pc,
+                },
+                other => VmError::Internal {
+                    message: format!("unexpected limit error: {other}"),
+                    pc: self.pc,
+                },
+            })
+            .map_err(|err| self.apply_memory_budget_precedence(err))
     }
 
     #[cfg(any(miri, not(feature = "allocator-memory-limits")))]
     #[allow(clippy::unused_self, clippy::missing_const_for_fn)]
     pub(super) fn memory_check(&mut self) -> Result<()> {
+        #[cfg(test)]
+        {
+            self.memory_check_count = self.memory_check_count.saturating_add(1);
+        }
         Ok(())
     }
 
@@ -598,5 +888,146 @@ impl RegoVM {
                 }));
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "allocator-memory-limits", not(miri)))]
+mod memory_budget_tests {
+    use super::RegoVM;
+    use super::VmError;
+    use crate::MemoryBudgetConfig;
+    use alloc::vec;
+    use core::num::NonZeroU64;
+
+    #[test]
+    fn foreign_free_observed_before_allocation_does_not_grant_budget_credit() -> anyhow::Result<()>
+    {
+        const FOREIGN_ALLOCATION_BYTES: usize = 512 * 1024;
+        const LOCAL_ALLOCATION_BYTES: usize = 256 * 1024;
+        const BUDGET_BYTES: u64 = 128 * 1024;
+
+        let foreign_allocation =
+            std::thread::spawn(|| vec![0_u8; FOREIGN_ALLOCATION_BYTES].into_boxed_slice())
+                .join()
+                .map_err(|_| anyhow::anyhow!("allocation thread panicked"))?;
+
+        let mut vm = RegoVM::new();
+        vm.set_memory_budget_config(Some(MemoryBudgetConfig {
+            limit: NonZeroU64::new(BUDGET_BYTES).unwrap_or(NonZeroU64::MIN),
+        }));
+        vm.reset_memory_budget_state();
+
+        drop(foreign_allocation);
+        vm.check_memory_budget()?;
+
+        let local_allocation = vec![0_u8; LOCAL_ALLOCATION_BYTES];
+        core::hint::black_box(&local_allocation);
+
+        match vm.check_memory_budget() {
+            Err(VmError::MemoryBudgetExceeded { .. }) => Ok(()),
+            Err(err) => Err(anyhow::anyhow!("unexpected memory budget error: {err}")),
+            Ok(()) => Err(anyhow::anyhow!("expected memory budget exhaustion")),
+        }
+    }
+
+    #[test]
+    fn memory_budget_error_takes_precedence_over_global_limit_error() {
+        const ALLOCATION_BYTES: usize = 256 * 1024;
+        const ALLOCATION_BYTES_U64: u64 = 256 * 1024;
+        const BUDGET_BYTES: u64 = 128 * 1024;
+
+        let mut vm = RegoVM::new();
+        vm.set_memory_budget_config(Some(MemoryBudgetConfig {
+            limit: NonZeroU64::new(BUDGET_BYTES).unwrap_or(NonZeroU64::MIN),
+        }));
+        vm.reset_memory_budget_state();
+
+        let allocation = vec![0_u8; ALLOCATION_BYTES];
+        core::hint::black_box(&allocation);
+
+        assert!(matches!(
+            vm.apply_memory_budget_precedence(VmError::MemoryLimitExceeded {
+                usage: ALLOCATION_BYTES_U64,
+                limit: BUDGET_BYTES,
+                pc: 0,
+            }),
+            VmError::MemoryBudgetExceeded { .. }
+        ));
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn ffi_result_serialization_window_cleans_up_on_terminal_paths() {
+        let mut program = crate::rvm::program::Program::new();
+        program.entry_points.insert("main".into(), 0);
+        program.instructions =
+            alloc::vec![crate::rvm::instructions::Instruction::Return { value: 0 }];
+        program.instruction_spans = alloc::vec![None];
+
+        let mut vm = RegoVM::new();
+        vm.load_program(alloc::sync::Arc::new(program));
+        vm.set_memory_budget_config(Some(MemoryBudgetConfig {
+            limit: NonZeroU64::new(1024 * 1024).unwrap_or(NonZeroU64::MIN),
+        }));
+
+        assert_eq!(
+            vm.execute_to_c_string_for_ffi()
+                .expect("main FFI serialization succeeds")
+                .as_bytes_with_nul(),
+            b"\"<undefined>\"\0"
+        );
+        assert_eq!(
+            vm.execute_entry_point_by_name_to_c_string_for_ffi("main")
+                .expect("named FFI serialization succeeds")
+                .as_bytes_with_nul(),
+            b"\"<undefined>\"\0"
+        );
+        assert_eq!(
+            vm.execute_entry_point_by_index_to_c_string_for_ffi(0)
+                .expect("indexed FFI serialization succeeds")
+                .as_bytes_with_nul(),
+            b"\"<undefined>\"\0"
+        );
+        assert!(matches!(
+            vm.memory_budget_lifecycle,
+            super::MemoryBudgetLifecycle::Inactive
+        ));
+
+        vm.set_max_instructions(0);
+        assert!(matches!(
+            vm.execute_to_c_string_for_ffi(),
+            Err(VmError::InstructionLimitExceeded { .. })
+        ));
+        assert!(matches!(
+            vm.execution_state,
+            super::super::execution_model::ExecutionState::Error {
+                error: VmError::InstructionLimitExceeded { .. }
+            }
+        ));
+        assert!(matches!(
+            vm.memory_budget_lifecycle,
+            super::MemoryBudgetLifecycle::Inactive
+        ));
+    }
+
+    #[allow(clippy::panic)]
+    #[test]
+    fn ffi_result_serialization_window_deactivates_during_unwind() {
+        let mut vm = RegoVM::new();
+        vm.set_memory_budget_config(Some(MemoryBudgetConfig {
+            limit: NonZeroU64::new(1024 * 1024).unwrap_or(NonZeroU64::MIN),
+        }));
+
+        let unwind = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+            vm.begin_ffi_result_serialization_memory_budget();
+            let _budget = super::FfiResultSerializationBudget { vm: &mut vm };
+            panic!("FFI serialization cleanup regression");
+        }));
+
+        assert!(unwind.is_err());
+        assert!(matches!(
+            vm.memory_budget_lifecycle,
+            super::MemoryBudgetLifecycle::Inactive
+        ));
     }
 }
