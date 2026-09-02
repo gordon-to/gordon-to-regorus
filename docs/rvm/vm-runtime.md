@@ -47,12 +47,22 @@ fields to responsibilities.
   `Program::check_rule_data_conflicts` to guard against rule/data collisions.
 - `set_max_instructions`, `set_execution_mode`, `set_step_mode`: configure
   runtime policy.
-- `set_host_await_responses`: used in run-to-completion mode when host await
-  responses are known ahead of time.
+- `set_host_await_responses`: pre-loads responses per identifier, consumed in
+  FIFO order when `HostAwait` executes in run-to-completion mode.
 - `set_strict_builtin_errors`: toggles builtin failure semantics between
   `VmError::ArithmeticError` and returning `Value::Undefined`.
 - Accessors (`get_pc`, `get_registers`, `get_loop_stack`, etc.) aid debugging
   and visualisation tooling.
+- `get_host_await_argument`: when the VM is suspended on a `HostAwait`, returns
+  the argument value passed by the policy. Returns `None` if not suspended or
+  suspended for a different reason. At the serialization boundary the argument
+  uses the same `Value`→JSON encoding as evaluation results.
+- `get_host_await_identifier`: when the VM is suspended on a `HostAwait`, returns
+  the identifier that triggered the suspension. Returns `None` if not applicable.
+  The identifier is an arbitrary `Value` chosen by the policy — for a registered
+  builtin it is the registered name, and for the raw `__builtin_host_await(arg, id)`
+  form it is whatever the second argument evaluates to. The current FFI exposes
+  string identifiers only.
 
 ---
 
@@ -68,8 +78,11 @@ fields to responsibilities.
   `execute_instruction`. The loop stops on `Return`, `Break`, or `VmError`.
   `Break` (emitted by `RuleReturn` and `DestructuringSuccess`) returns
   register 0 to the caller for compatibility with rule evaluation.
-- Suspension is not allowed; encountering an instruction that would suspend
-  (e.g. `HostAwait`) raises an internal error.
+- Suspension is not allowed: an instruction that would suspend the VM raises an
+  internal error. `HostAwait` therefore does not suspend here — it consumes the
+  next pre-loaded response for its identifier (see `set_host_await_responses`),
+  and raises `VmError::HostAwaitResponseMissing` only when no response is
+  queued for that identifier.
 - Instruction budgets trigger `VmError::InstructionLimitExceeded` and switch the
   state to `ExecutionState::Error`.
 
@@ -226,8 +239,10 @@ assertion messages. When an internal invariant fails, the error message includes
   assembly listing) and enable `set_step_mode(true)` to pause after each
   instruction.
 - **Host await**: in run-to-completion mode, configure `set_host_await_responses`
-  before execution. In suspendable mode, expect `ExecutionState::Suspended {
-  reason: HostAwait { .. } }` and resume with the chosen value.
+  before execution; each `HostAwait` consumes the next queued response for its
+  identifier, and a missing response is a `VmError::HostAwaitResponseMissing`.
+  In suspendable mode, expect `ExecutionState::Suspended { reason: HostAwait
+  { .. } }`, read the identifier and argument, and resume with the chosen value.
 - **Builtin strictness**: `set_strict_builtin_errors(true)` reports type
   mismatches as `VmError::ArithmeticError`; leave it `false` to coerce results
   to `Value::Undefined`.
