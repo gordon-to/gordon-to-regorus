@@ -20,8 +20,9 @@
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE
 
-The file src/builtins/time/diff.rs contains code derived from Go's `time`
-package, which carries the following license:
+The files src/builtins/time/diff.rs and src/builtins/strings/go_is_print.rs
+contain code derived from Go's standard library, which carries the following
+license:
 
     Copyright (c) 2009 The Go Authors. All rights reserved.
     

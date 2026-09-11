@@ -1,0 +1,20 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+cases:
+  - note: sprintf_q_rvm_quoting_unicode_width_precision
+    data: {}
+    modules:
+      - |
+        package test
+
+        result := {
+          "quoted": sprintf("%q", ["a\u2028b"]),
+          "width": sprintf("%5q", ["é"]),
+          "precision": sprintf("%.1q", ["éx"]),
+        }
+    query: data.test.result
+    want_result:
+      quoted: "\"a\\u2028b\""
+      width: "  \"é\""
+      precision: "\"é\""

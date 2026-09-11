@@ -78,3 +78,89 @@ cases:
         error_case := sprintf("Value: %s %d", ["only_one"])
     query: data.test
     error: "no argument specified for format verb 1"
+
+  - note: "%q string quoting (strconv.Quote / Go-syntax quoted string)"
+    data: {}
+    modules:
+      - |
+        package test
+
+        plain := sprintf("%q", ["foo"])
+        double_quote := sprintf("%q", ["a\"b"])
+        backslash := sprintf("%q", ["back\\slash"])
+        tab := sprintf("%q", ["tab\there"])
+        newline := sprintf("%q", ["nl\nhere"])
+        carriage_return := sprintf("%q", ["cr\rhere"])
+        emoji := sprintf("%q", ["emoji🙂"])
+        non_ascii := sprintf("%q", ["юнікод"])
+        # %q must NOT HTML-escape < > & (that is what distinguishes it from
+        # json.marshal).
+        angle_and_amp := sprintf("%q", ["a<b>&c"])
+        soft_hyphen := sprintf("%q", ["\u00ad"])
+        zero_width_space := sprintf("%q", ["\u200b"])
+        line_separator := sprintf("%q", ["a\u2028b"])
+        paragraph_separator := sprintf("%q", ["a\u2029b"])
+        private_use := sprintf("%q", ["\ue000"])
+        noncharacter := sprintf("%q", ["\ufdd0"])
+        unassigned := sprintf("%q", ["\u0378"])
+        empty := sprintf("%q", [""])
+    query: data.test
+    want_result:
+      plain: "\"foo\""
+      double_quote: "\"a\\\"b\""
+      backslash: "\"back\\\\slash\""
+      tab: "\"tab\\there\""
+      newline: "\"nl\\nhere\""
+      carriage_return: "\"cr\\rhere\""
+      emoji: "\"emoji🙂\""
+      non_ascii: "\"юнікод\""
+      angle_and_amp: "\"a<b>&c\""
+      soft_hyphen: "\"\\u00ad\""
+      zero_width_space: "\"\\u200b\""
+      line_separator: "\"a\\u2028b\""
+      paragraph_separator: "\"a\\u2029b\""
+      private_use: "\"\\ue000\""
+      noncharacter: "\"\\ufdd0\""
+      unassigned: "\"\\u0378\""
+      empty: "\"\""
+
+  - note: "%q width and precision"
+    data: {}
+    modules:
+      - |
+        package test
+
+        padded := sprintf("%10q", ["foo"])
+        zero_padded := sprintf("%05q", ["a"])
+        truncated := sprintf("%.3q", ["abcdef"])
+        empty := sprintf("%.0q", ["abcdef"])
+        unicode_width := sprintf("%6q", ["🙂"])
+        unicode_precision := sprintf("%.1q", ["🙂x"])
+    query: data.test
+    want_result:
+      padded: "     \"foo\""
+      zero_padded: "00\"a\""
+      truncated: "\"abc\""
+      empty: "\"\""
+      unicode_width: "   \"🙂\""
+      unicode_precision: "\"🙂\""
+
+  - note: "%q on a number still errors"
+    data: {}
+    modules:
+      - |
+        package test
+
+        error_case := sprintf("%q", [42])
+    query: data.test
+    error: "number specified for format verb q."
+
+  - note: "%q on a non-string, non-number value still errors (only Value::String is supported)"
+    data: {}
+    modules:
+      - |
+        package test
+
+        error_case := sprintf("%q", [true])
+    query: data.test
+    error: "Go-syntax format verbs %#v. %q, %p and %T are not supported."

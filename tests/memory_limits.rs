@@ -80,6 +80,12 @@ package limit
 large_array := json.unmarshal(data.limit.large_json)
 "#;
 
+const SPRINTF_QUOTE_MODULE: &str = r#"
+package limit
+
+quoted := sprintf("%q", [input])
+"#;
+
 #[cfg(feature = "rvm")]
 const TIGHT_MEMORY_BUDGET_BYTES: u64 = 64 * 1024;
 
@@ -210,6 +216,21 @@ fn interpreter_memory_limit_during_large_allocation() {
     let err = engine
         .eval_rule("data.limit.large_array".to_string())
         .expect_err("expected interpreter memory limit error while parsing");
+    assert_memory_limit_error(&err);
+}
+
+#[test]
+fn sprintf_quote_propagates_memory_limit_errors() {
+    let mut guard = LimitGuard::lock();
+    let mut engine = new_engine_with_module(SPRINTF_QUOTE_MODULE);
+    engine.set_input(Value::String("\0".repeat(100_000).into()));
+
+    // Quoting expands every NUL byte to four output bytes. Leave enough room
+    // to enter the builtin, but not enough to finish materializing the result.
+    guard.set_with_additional_budget(64 * 1024);
+    let err = engine
+        .eval_rule("data.limit.quoted".to_string())
+        .expect_err("expected sprintf quoting to hit the memory limit");
     assert_memory_limit_error(&err);
 }
 
