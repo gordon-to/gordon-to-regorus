@@ -62,14 +62,14 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
     # Setup language-specific dependencies BEFORE CodeQL init for proper tracing setup
     - name: Setup Rust
       uses: ./.github/actions/toolchains/rust
 
     - name: Cache cargo
-      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       with:
         shared-key: ${{ runner.os }}-regorus
 
@@ -86,26 +86,26 @@ jobs:
 
     - name: Setup Python
       if: matrix.language == 'python'
-      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: '3.10'
 
     - name: Setup Java
       if: matrix.language == 'java-kotlin'
-      uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+      uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
       with:
         distribution: 'corretto'
         java-version: '8'
 
     - name: Setup Go
       if: matrix.language == 'go'
-      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
       with:
         go-version: '1.21'
 
     - name: Setup .NET
       if: matrix.language == 'csharp'
-      uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7 # v5.2.0
       with:
         global-json-file: ./bindings/csharp/global.json
 
@@ -115,12 +115,12 @@ jobs:
 
     - name: Setup Node.js
       if: matrix.language == 'javascript-typescript'
-      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
       with:
         node-version: '18'
 
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+      uses: github/codeql-action/init@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
       with:
         languages: ${{ matrix.language }}
         build-mode: ${{ matrix.build-mode }}
@@ -141,7 +141,7 @@ jobs:
 
     - name: Setup Ruby
       if: matrix.language == 'rust' && contains(matrix.working-directory, 'ruby')
-      uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+      uses: ruby/setup-ruby@3ff19f5e2baf30647122352b96108b1fbe250c64 # v1.299.0
       with:
         ruby-version: '3.4.2'
         bundler-cache: true
@@ -188,6 +188,6 @@ jobs:
       run: cargo xtask build-wasm --release
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+      uses: github/codeql-action/analyze@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
       with:
         category: "/language:${{matrix.language}}"
