@@ -39,14 +39,14 @@ jobs:
               **/release/libregorus_ffi.dylib
     steps:
       - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
       - uses: ./.github/actions/toolchains/rust
         with:
           targets: ${{ matrix.runtime.target }}
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: ${{ runner.os }}-regorus
       - name: Fetch dependencies
@@ -59,7 +59,7 @@ jobs:
         run: cargo xtask build-ffi --release --target ${{ matrix.runtime.target }}
         
       - name: Upload regorus ffi shared library
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: regorus-ffi-artifacts-${{ matrix.runtime.target }}
           # Note: The full path of each artifact relative to . is preserved.
@@ -73,18 +73,18 @@ jobs:
     needs: build-ffi
     steps:
       - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0  
       - uses: ./.github/actions/toolchains/rust
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      - uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7 # v5.2.0
         with:
           global-json-file: ./bindings/csharp/global.json
 
       - run: echo '${{ steps.stepid.outputs.dotnet-version }}'
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: ${{ runner.os }}-regorus
 
@@ -105,12 +105,12 @@ jobs:
         run: cargo xtask build-csharp --release --clean --artifacts-dir ./bindings/csharp/Regorus/tmp/bindings/ffi/target --enforce-artifacts --repository-commit ${{ github.sha }} --include-symbols
 
       - name: Upload Regorus nuget
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: regorus-nuget
           path: |
-            bindings/csharp/Regorus/bin/Release/Microsoft.Regorus*.nupkg
-            bindings/csharp/Regorus/bin/Release/Microsoft.Regorus*.snupkg
+            bindings/csharp/Regorus/bin/Release/Regorus*.nupkg
+            bindings/csharp/Regorus/bin/Release/Regorus*.snupkg
           if-no-files-found: error
           retention-days: 1
 
@@ -131,20 +131,20 @@ jobs:
             target: aarch64-apple-darwin
     steps:
       - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
 
       - uses: ./.github/actions/toolchains/rust
 
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      - uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7 # v5.2.0
         with:
           global-json-file: ./bindings/csharp/global.json
 
       - run: echo '${{ steps.stepid.outputs.dotnet-version }}'
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: ${{ runner.os }}-regorus
 
