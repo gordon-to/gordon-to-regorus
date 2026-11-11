@@ -23,19 +23,6 @@ jobs:
           git remote add upstream https://github.com/microsoft/regorus.git
           git fetch upstream main
 
-      - name: Check for new release
-        id: check
-        run: |
-          CURRENT=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          UPSTREAM=$(git show upstream/main:Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
-          echo "current=$CURRENT upstream=$UPSTREAM"
-          echo "upstream=$UPSTREAM" >> $GITHUB_OUTPUT
-          if [ "$CURRENT" != "$UPSTREAM" ]; then
-            echo "new_release=true" >> $GITHUB_OUTPUT
-          else
-            echo "new_release=false" >> $GITHUB_OUTPUT
-          fi
-
       - name: Sync main to upstream (preserving our workflows)
         run: |
           git config user.name "github-actions[bot]"
@@ -62,8 +49,20 @@ jobs:
           git commit -m "preserve gordon-to workflows"
           git push origin main --force
 
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: publish
+          path: _publish
+
+      - name: Check published distributions
+        id: check
+        run: |
+          VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          MISSING=$(python3 _publish/.github/check_pypi.py "$VERSION")
+          echo "publish_needed=$MISSING" >> "$GITHUB_OUTPUT"
+
       - name: Trigger publish
-        if: steps.check.outputs.new_release == 'true'
+        if: steps.check.outputs.publish_needed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run publish-python.yml -R "$GITHUB_REPOSITORY" --ref publish -f target=pypi

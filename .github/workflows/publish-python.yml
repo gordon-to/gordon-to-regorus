@@ -12,6 +12,10 @@ on:
           - pypi
           - testpypi
 
+concurrency:
+  group: publish-python-${{ inputs.target }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -159,4 +163,5 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
+          skip-existing: true
           repository-url: ${{ inputs.target == 'testpypi' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
