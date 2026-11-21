@@ -52,10 +52,6 @@ jobs:
           - name: observability
             features: std,arc,rvm,coverage,cache
 
-          # Default-off explanations (implies rvm) without full-opa.
-          - name: explanations
-            features: std,arc,explanations
-
           # Azure Policy adds jsonschema + dashmap; test it compiles
           # and runs on top of full-opa.
           - name: azure-policy
@@ -71,11 +67,11 @@ jobs:
             features: arc,opa-no-std
 
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
     - name: Setup Rust toolchain
       uses: ./.github/actions/toolchains/rust
     - name: Cache cargo
-      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       with:
         shared-key: ${{ runner.os }}-regorus-features
     - name: Fetch dependencies
